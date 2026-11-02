@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PairLink — Pengontrol</title><link rel="stylesheet" href="/style.css"></head>
+<body><main>
+  <h1>PairLink</h1><p>HP Pengontrol · Buat kode dan kendalikan fitur yang disetujui HP target.</p>
+  <section class="card"><h2>1. Kode pairing</h2><div id="code">------</div><div class="row"><button id="create">Buat kode</button></div><p class="muted">Kode berlaku 5 menit. Pembuatan kode berikutnya memiliki jeda 5 menit.</p><div id="status">Menghubungkan ke server…</div></section>
+  <section class="card"><h2>2. Layar HP target</h2><video id="remoteVideo" autoplay playsinline controls></video><p class="muted">Tampilan muncul setelah target menyetujui pairing dan menekan “Bagikan layar”.</p></section>
+  <section class="card"><h2>3. Perintah</h2><label for="message">Tulisan di layar target</label><input id="message" maxlength="180" placeholder="Tulis pesan…"><button id="sendText" disabled>Kirim tulisan</button><div class="row"><button id="torchOn" disabled>Nyalakan senter</button><button class="secondary" id="torchOff" disabled>Matikan senter</button></div></section>
+</main>
+<script src="/socket.io/socket.io.js"></script><script>
+const $=id=>document.getElementById(id);
+const status=(s)=>$("status").textContent=s;
+const socket=io({transports:["websocket","polling"]});
+const stored=localStorage.getItem("pairlink-controller-id")||crypto.randomUUID().replaceAll("-","");
+localStorage.setItem("pairlink-controller-id",stored);
+let paired=false, pc=null;
+const setControls=on=>["sendText","torchOn","torchOff"].forEach(id=>$(id).disabled=!on);
+setControls(false);
+socket.on("connect",()=>status("Terhubung. Buat kode untuk memulai."));
+socket.on("connect_error",()=>status("Tidak dapat terhubung ke server."));
+$("create").onclick=()=>{ $("create").disabled=true; socket.emit("create_code",{controllerId:stored},r=>{
+  if(!r.ok){status(r.error);$("create").disabled=false;return;}
+  $("code").textContent=r.code;status("Kode aktif selama 5 menit. Masukkan kode ini di HP target.");
+  // Cooldown is enforced by server; re-enable button after the full interval.
+  setTimeout(()=>$("create").disabled=false,300000);
+});};
+socket.on("pair_request",()=>status("Permintaan masuk. Menunggu persetujuan di HP target…"));
+socket.on("pair_rejected",()=>status("Permintaan pairing ditolak di HP target."));
+socket.on("paired",()=>{paired=true;setControls(true);status("Terhubung. Target menyetujui pairing.");});
+$("sendText").onclick=()=>socket.emit("command",{type:"show_text",text:$("message").value},r=>status(r.ok?"Tulisan dikirim.":r.error));
+$("torchOn").onclick=()=>socket.emit("command",{type:"torch",enabled:true},r=>status(r.ok?"Perintah senter dikirim.":r.error));
+$("torchOff").onclick=()=>socket.emit("command",{type:"torch",enabled:false},r=>status(r.ok?"Perintah senter dikirim.":r.error));
+function makePeer(){
+  pc=new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+  pc.ontrack=e=>{$("remoteVideo").srcObject=e.streams[0];};
+  pc.onicecandidate=e=>{if(e.candidate)socket.emit("signal",{type:"ice",candidate:e.candidate});};
+}
+socket.on("signal",async m=>{
+  if(m.type==="offer"){
+    makePeer();await pc.setRemoteDescription(m.description);
+    const answer=await pc.createAnswer();await pc.setLocalDescription(answer);
+    socket.emit("signal",{type:"answer",description:pc.localDescription});
+  }else if(m.type==="ice"&&pc&&m.candidate){try{await pc.addIceCandidate(m.candidate);}catch(e){console.warn(e);}}
+});
+socket.on("peer_disconnected",()=>{paired=false;setControls(false);status("Perangkat lain terputus.");if(pc)pc.close();$("remoteVideo").srcObject=null;});
+</script></body></html>

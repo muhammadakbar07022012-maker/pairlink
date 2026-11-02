@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PairLink — Target</title><link rel="stylesheet" href="/style.css"></head>
+<body><main>
+  <h1>PairLink</h1><p>HP Target · Masukkan kode dari HP pengontrol.</p>
+  <section class="card"><h2>1. Pairing</h2><input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="Masukkan 6 digit kode"><button id="join">Kirim kode</button><div id="status">Belum terhubung.</div></section>
+  <section class="card hidden" id="consent"><h2>2. Persetujuan koneksi</h2><p>HP pengontrol meminta koneksi ke perangkat ini. Jika disetujui, pengontrol dapat melihat layar yang kamu bagikan dan mengirim tulisan atau perintah senter.</p><div class="row"><button id="approve">Setujui koneksi</button><button class="danger" id="reject">Tolak</button></div></section>
+  <section class="card hidden" id="sharing"><h2>3. Bagikan layar</h2><p>Tekan tombol ini, lalu pilih opsi berbagi layar pada dialog Android/browser. Berbagi layar dapat dihentikan kapan saja dari notifikasi atau kontrol berbagi layar Android.</p><button id="share">Bagikan layar sekarang</button><button class="secondary" id="stopShare">Hentikan berbagi layar</button><p class="muted" id="shareStatus">Layar belum dibagikan.</p></section>
+  <section class="card hidden" id="torch"><h2>4. Senter</h2><p>Untuk senter, izinkan akses kamera saat diminta browser. Video kamera tidak dikirim ke pengontrol.</p><button id="allowCamera">Aktifkan izin kamera</button><p class="muted" id="torchStatus">Senter belum aktif.</p></section>
+</main>
+<div id="overlay"><div><div class="message" id="overlayText"></div><div style="text-align:center"><button id="closeOverlay">Tutup tulisan</button></div></div></div>
+<script src="/socket.io/socket.io.js"></script><script>
+const $=id=>document.getElementById(id), status=s=>$("status").textContent=s;
+const socket=io({transports:["websocket","polling"]});
+let paired=false,pc=null,screenStream=null,cameraTrack=null;
+socket.on("connect",()=>status("Terhubung ke server. Masukkan kode."));
+socket.on("connect_error",()=>status("Tidak dapat terhubung ke server."));
+$("join").onclick=()=>{const code=$("code").value.replace(/\D/g,"").slice(0,6);if(code.length!==6){status("Masukkan tepat 6 digit.");return;}
+socket.emit("join_code",{code},r=>status(r.ok?r.message:r.error));};
+socket.on("pair_request",()=>{$("consent").classList.remove("hidden");status("Permintaan pairing diterima. Periksa dan pilih setuju atau tolak.");});
+$("approve").onclick=()=>socket.emit("approve_pair",{},r=>{if(!r.ok){status(r.error);return;}paired=true;$("consent").classList.add("hidden");$("sharing").classList.remove("hidden");$("torch").classList.remove("hidden");status("Pairing disetujui. Pilih fitur yang ingin diaktifkan.");});
+$("reject").onclick=()=>{socket.emit("reject_pair");$("consent").classList.add("hidden");status("Permintaan ditolak.");};
+function sendSignal(data){socket.emit("signal",data);}
+function makePeer(){
+  pc=new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+  pc.onicecandidate=e=>{if(e.candidate)sendSignal({type:"ice",candidate:e.candidate});};
+}
+$("share").onclick=async()=>{
+  if(!paired)return;
+  if(!navigator.mediaDevices?.getDisplayMedia){$("shareStatus").textContent="Browser ini tidak mendukung berbagi layar. Coba Chrome terbaru; dukungan Android berbeda menurut perangkat.";return;}
+  try{
+    screenStream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
+    makePeer();screenStream.getTracks().forEach(t=>{pc.addTrack(t,screenStream);t.onended=stopSharing;});
+    const offer=await pc.createOffer();await pc.setLocalDescription(offer);
+    sendSignal({type:"offer",description:pc.localDescription});
+    $("shareStatus").textContent="Layar sedang dibagikan. Hentikan kapan saja dengan tombol di bawah.";
+  }catch(e){$("shareStatus").textContent="Berbagi layar tidak dimulai: "+e.message;}
+};
+socket.on("signal",async m=>{
+  try{
+    if(m.type==="answer"&&pc){await pc.setRemoteDescription(m.description);}
+    else if(m.type==="ice"&&pc&&m.candidate){await pc.addIceCandidate(m.candidate);}
+  }catch(e){console.warn(e);}
+});
+function stopSharing(){
+  if(screenStream){screenStream.getTracks().forEach(t=>t.stop());screenStream=null;}
+  if(pc){pc.close();pc=null;}
+  $("shareStatus").textContent="Berbagi layar dihentikan.";
+}
+$("stopShare").onclick=stopSharing;
+$("allowCamera").onclick=async()=>{
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"},audio:false});
+    cameraTrack=stream.getVideoTracks()[0];
+    const caps=cameraTrack.getCapabilities?.();
+    if(!caps?.torch){$("torchStatus").textContent="Browser/perangkat ini tidak menyediakan kontrol torch.";stream.getTracks().forEach(t=>t.stop());cameraTrack=null;return;}
+    $("torchStatus").textContent="Izin kamera aktif. Senter siap menerima perintah.";
+  }catch(e){$("torchStatus").textContent="Izin kamera gagal: "+e.message;}
+};
+async function setTorch(enabled){
+  if(!cameraTrack){$("torchStatus").textContent="Aktifkan izin kamera terlebih dahulu.";return;}
+  try{await cameraTrack.applyConstraints({advanced:[{torch:enabled}]});$("torchStatus").textContent=enabled?"Senter dinyalakan.":"Senter dimatikan.";}
+  catch(e){$("torchStatus").textContent="Perintah senter gagal: "+e.message;}
+}
+socket.on("command",m=>{
+  if(!paired)return;
+  if(m.type==="show_text"){$("overlayText").textContent=m.text;$("overlay").style.display="flex";}
+  if(m.type==="torch")setTorch(Boolean(m.enabled));
+});
+$("closeOverlay").onclick=()=>$("overlay").style.display="none";
+socket.on("peer_disconnected",()=>{paired=false;stopSharing();if(cameraTrack){cameraTrack.stop();cameraTrack=null;}status("HP pengontrol terputus. Sesi ditutup.");$("sharing").classList.add("hidden");$("torch").classList.add("hidden");});
+window.addEventListener("beforeunload",()=>{stopSharing();if(cameraTrack)cameraTrack.stop();});
+</script></body></html>
